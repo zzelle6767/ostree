@@ -554,8 +554,7 @@ write_object (OstreeRepo         *self,
   gboolean temp_file_is_symlink;
   gboolean object_is_symlink = FALSE;
   char loose_objpath[_OSTREE_LOOSE_PATH_MAX];
-  gssize unpacked_size = 0;
-  gboolean indexable = FALSE;
+  guint64 unpacked_size = 0;
 
   g_return_val_if_fail (expected_checksum || out_csum, FALSE);
 
@@ -659,9 +658,6 @@ write_object (OstreeRepo         *self,
           g_autoptr(GConverter) zlib_compressor = NULL;
           g_autoptr(GOutputStream) compressed_out_stream = NULL;
 
-          if (self->generate_sizes)
-            indexable = TRUE;
-
           if (!gs_file_open_in_tmpdir_at (self->tmp_dir_fd, 0644,
                                           &temp_filename, &temp_out,
                                           cancellable, error))
@@ -681,10 +677,10 @@ write_object (OstreeRepo         *self,
               /* Don't close the base; we'll do that later */
               g_filter_output_stream_set_close_base_stream ((GFilterOutputStream*)compressed_out_stream, FALSE);
               
-              unpacked_size = g_output_stream_splice (compressed_out_stream, file_input,
-                                                      0, cancellable, error);
-              if (unpacked_size < 0)
+              if (g_output_stream_splice (compressed_out_stream, file_input, 0, cancellable, error) < 0)
                 goto out;
+
+              unpacked_size = g_file_info_get_size (file_info);
             }
         }
       else
@@ -705,6 +701,7 @@ write_object (OstreeRepo         *self,
                                   cancellable, error) < 0)
         goto out;
       temp_file_is_regular = TRUE;
+      unpacked_size = file_object_length;
     }
 
   if (temp_out)
@@ -730,7 +727,7 @@ write_object (OstreeRepo         *self,
 
   g_assert (actual_checksum != NULL); /* Pacify static analysis */
           
-  if (indexable && temp_file_is_regular)
+  if (repo_mode == OSTREE_REPO_MODE_ARCHIVE_Z2 && self->generate_sizes && temp_file_is_regular)
     {
       struct stat stbuf;
 

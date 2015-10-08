@@ -428,6 +428,134 @@ add_size_index_to_metadata (OstreeRepo        *self,
 }
 
 static gboolean
+ostree_repo_commit_unpack_sizes (GVariant                    *entry,
+                                 OstreeContentSizeCacheEntry *sizes,
+                                 char                        *csum)
+{
+  gboolean ret = FALSE;
+  const guchar *buffer;
+  gsize bytes_read = 0;
+  gsize object_size = g_variant_get_size (entry);
+
+  if (object_size <= 32)
+    goto out;
+
+  buffer = g_variant_get_data (entry);
+  if (!buffer)
+    goto out;
+
+  ostree_checksum_inplace_from_bytes (buffer, csum);
+  buffer += 32;
+  object_size -= 32;
+
+  if (!_ostree_read_varuint64 (buffer, object_size, &(sizes->archived), &bytes_read))
+    goto out;
+  buffer += bytes_read;
+  object_size -= bytes_read;
+
+  if (!_ostree_read_varuint64 (buffer, object_size, &(sizes->unpacked), &bytes_read))
+    goto out;
+  buffer += bytes_read;
+  object_size -= bytes_read;
+
+  if (object_size < 1)
+    goto out;
+
+  if (*buffer < OSTREE_OBJECT_TYPE_FILE || *buffer > OSTREE_OBJECT_TYPE_LAST)
+    goto out;
+  sizes->objtype = (OstreeObjectType) *buffer;
+
+  ret = TRUE;
+out:
+  return ret;
+}
+
+gboolean
+ostree_repo_get_commit_sizes (OstreeRepo *self,
+                              const char *rev,
+                              gint64 *new_archived,
+                              gint64 *new_unpacked,
+                              gsize  *new_files,
+                              gint64 *archived,
+                              gint64 *unpacked,
+                              gsize  *files,
+                              GCancellable *cancellable,
+                              GError **error)
+{
+  gboolean ret = FALSE;
+  guint64 n_archived = 0;
+  guint64 n_unpacked = 0;
+  gsize n_files = 0;
+  guint64 t_archived = 0;
+  guint64 t_unpacked = 0;
+  gsize t_files = 0;
+  GVariantIter obj_iter;
+  gs_unref_variant GVariant *object = NULL;
+  gs_unref_variant GVariant *commit = NULL;
+  gs_unref_variant GVariant *metadata = NULL;
+  gs_unref_variant GVariant *sizes = NULL;
+
+  if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_COMMIT, rev,
+                                 &commit, error))
+    {
+      g_prefix_error (error, "Failed to read commit: ");
+      goto out;
+    }
+
+  metadata = g_variant_get_child_value (commit, 0);
+
+  sizes = g_variant_lookup_value (metadata, "ostree.sizes", G_VARIANT_TYPE("aay"));
+  if (!sizes)
+    goto out; // No size data is available
+
+  g_variant_iter_init (&obj_iter, sizes);
+  while ((object = g_variant_iter_next_value (&obj_iter)))
+    {
+      OstreeContentSizeCacheEntry entry;
+      char csum[65];
+      gboolean exists;
+
+      if (!ostree_repo_commit_unpack_sizes (object, &entry, csum))
+      {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "Invalid object size metadata");
+        goto out;
+      }
+      g_variant_unref (object);
+      object = NULL;
+
+      t_archived += entry.archived;
+      t_unpacked += entry.unpacked;
+
+      if (entry.objtype == OSTREE_OBJECT_TYPE_FILE)
+        t_files++;
+
+      if (!ostree_repo_has_object (self, entry.objtype,
+                                   csum, &exists, cancellable, error))
+        goto out;
+
+      // cache check completed, but file is not in cache:
+      if (!exists)
+        {
+          n_archived += entry.archived;
+          n_unpacked += entry.unpacked;
+          if (entry.objtype == OSTREE_OBJECT_TYPE_FILE)
+            n_files++;
+        }
+    }
+
+    ret = TRUE;
+    if (new_archived) *new_archived = n_archived;
+    if (new_unpacked) *new_unpacked = n_unpacked;
+    if (new_files) *new_files = n_files;
+    if (archived) *archived = t_archived;
+    if (unpacked) *unpacked = t_unpacked;
+    if (files) *files = t_files;
+out:
+  return ret;
+}
+
+static gboolean
 fallocate_stream (GFileDescriptorBased      *stream,
                   goffset                    size,
                   GCancellable              *cancellable,

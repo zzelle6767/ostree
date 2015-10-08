@@ -308,14 +308,14 @@ commit_loose_object_trusted (OstreeRepo        *self,
 typedef struct
 {
   OstreeObjectType objtype;
-  gsize unpacked;
-  gsize archived;
+  guint64 unpacked;
+  guint64 archived;
 } OstreeContentSizeCacheEntry;
 
 static OstreeContentSizeCacheEntry *
 content_size_cache_entry_new (OstreeObjectType objtype,
-                              gsize            unpacked,
-                              gsize            archived)
+                              guint64          unpacked,
+                              guint64          archived)
 {
   OstreeContentSizeCacheEntry *entry = g_slice_new0 (OstreeContentSizeCacheEntry);
 
@@ -337,8 +337,8 @@ static void
 repo_store_size_entry (OstreeRepo       *self,
                        OstreeObjectType  objtype,
                        const gchar      *checksum,
-                       gsize             unpacked,
-                       gsize             archived)
+                       guint64           unpacked,
+                       guint64           archived)
 {
   if (G_UNLIKELY (self->object_sizes == NULL))
     self->object_sizes = g_hash_table_new_full (g_str_hash, g_str_equal,

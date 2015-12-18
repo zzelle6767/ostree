@@ -39,6 +39,7 @@ struct OstreeSysroot {
   OstreeSePolicy *sepolicy;
   
   GPtrArray *deployments;
+  GPtrArray *staged_deployments;
   int bootversion;
   int subbootversion;
   OstreeDeployment *booted_deployment;
@@ -71,10 +72,17 @@ _ostree_sysroot_parse_deploy_path_name (const char *name,
                                         GError    **error);
 
 gboolean
-_ostree_sysroot_list_deployment_dirs_for_os (GFile               *osdir,
+_ostree_sysroot_list_deployment_dirs_for_os (OstreeSysroot       *self,
+                                             GFile               *osdir,
                                              GPtrArray           *inout_deployments,
                                              GCancellable        *cancellable,
                                              GError             **error);
+
+gboolean
+_ostree_sysroot_list_all_deployment_dirs (OstreeSysroot       *self,
+                                          GPtrArray          **out_deployments,
+                                          GCancellable        *cancellable,
+                                          GError             **error);
 
 char *
 _ostree_sysroot_get_origin_relpath (GFile         *path,
@@ -89,6 +97,17 @@ gboolean _ostree_sysroot_query_bootloader (OstreeSysroot     *sysroot,
                                            OstreeBootloader **out_bootloader,
                                            GCancellable      *cancellable,
                                            GError           **error);
+
+gboolean
+_ostree_sysroot_get_bootcsum_for_revision (OstreeSysroot  *self,
+                                           const char     *revision,
+                                           const char    **out_bootcsum,
+                                           GCancellable   *cancellable,
+                                           GError        **error);
+
+GFile *
+_ostree_sysroot_get_deployment_staged_file (OstreeSysroot    *self,
+                                            OstreeDeployment *deployment);
 
 typedef enum {
   OSTREE_SYSROOT_CLEANUP_BOOTVERSIONS = 1 << 0,

@@ -132,7 +132,8 @@ GKeyFile *ostree_sysroot_origin_new_from_refspec (OstreeSysroot      *self,
 
 typedef enum {
   OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_NONE = 0,
-  OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_RETAIN = (1 << 0)
+  OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_RETAIN = (1 << 0),
+  OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_NO_CLEANUP = (1 << 1)
 } OstreeSysrootSimpleWriteDeploymentFlags;
 
 gboolean ostree_sysroot_simple_write_deployment (OstreeSysroot      *sysroot,

@@ -26,7 +26,49 @@
 #include "ostree-sysroot-private.h"
 
 gboolean
-_ostree_sysroot_list_deployment_dirs_for_os (GFile               *osdir,
+_ostree_sysroot_get_bootcsum_for_revision (OstreeSysroot     *self,
+                                           const char     *revision,
+                                           const char    **out_bootcsum,
+                                           GCancellable   *cancellable,
+                                           GError        **error)
+{
+  gboolean ret = FALSE;
+  glnx_unref_object OstreeRepo *repo = NULL;
+  g_autoptr(GFile) commit_root = NULL;
+  g_autoptr(GFile) tree_kernel_path = NULL;
+  g_autoptr(GFile) tree_initramfs_path = NULL;
+  g_autofree char *bootcsum = NULL;
+
+  if (!ostree_sysroot_get_repo (self, &repo, cancellable, error))
+    goto out;
+
+  if (!ostree_repo_read_commit (repo, revision, &commit_root, NULL, cancellable, error))
+    goto out;
+
+  if (!get_kernel_from_tree (commit_root, &tree_kernel_path, &tree_initramfs_path,
+                             cancellable, error))
+    goto out;
+
+  if (tree_initramfs_path != NULL)
+    {
+      if (!checksum_from_kernel_src (tree_initramfs_path, &bootcsum, error))
+        goto out;
+    }
+  else
+    {
+      if (!checksum_from_kernel_src (tree_kernel_path, &bootcsum, error))
+        goto out;
+    }
+
+  ret = TRUE;
+  ot_transfer_out_value (out_bootcsum, &bootcsum);
+out:
+  return ret;
+}
+
+gboolean
+_ostree_sysroot_list_deployment_dirs_for_os (OstreeSysroot       *self,
+                                             GFile               *osdir,
                                              GPtrArray           *inout_deployments,
                                              GCancellable        *cancellable,
                                              GError             **error)
@@ -63,6 +105,7 @@ _ostree_sysroot_list_deployment_dirs_for_os (GFile               *osdir,
       GFile *child = NULL;
       glnx_unref_object OstreeDeployment *deployment = NULL;
       g_autofree char *csum = NULL;
+      g_autofree char *bootcsum = NULL;
       gint deployserial;
 
       if (!gs_file_enumerator_iterate (dir_enum, &file_info, &child,
@@ -78,8 +121,12 @@ _ostree_sysroot_list_deployment_dirs_for_os (GFile               *osdir,
 
       if (!_ostree_sysroot_parse_deploy_path_name (name, &csum, &deployserial, error))
         goto out;
+
+      if (!_ostree_sysroot_get_bootcsum_for_revision (self, csum, &bootcsum,
+                                                      cancellable, error))
+        goto out;
       
-      deployment = ostree_deployment_new (-1, osname, csum, deployserial, NULL, -1);
+      deployment = ostree_deployment_new (-1, osname, csum, deployserial, bootcsum, -1);
       g_ptr_array_add (inout_deployments, g_object_ref (deployment));
     }
 
@@ -89,11 +136,11 @@ _ostree_sysroot_list_deployment_dirs_for_os (GFile               *osdir,
   return ret;
 }
 
-static gboolean
-list_all_deployment_directories (OstreeSysroot       *self,
-                                 GPtrArray          **out_deployments,
-                                 GCancellable        *cancellable,
-                                 GError             **error)
+gboolean
+_ostree_sysroot_list_all_deployment_dirs (OstreeSysroot       *self,
+                                          GPtrArray          **out_deployments,
+                                          GCancellable        *cancellable,
+                                          GError             **error)
 {
   gboolean ret = FALSE;
   g_autoptr(GFileEnumerator) dir_enum = NULL;
@@ -136,7 +183,7 @@ list_all_deployment_directories (OstreeSysroot       *self,
       if (g_file_info_get_file_type (file_info) != G_FILE_TYPE_DIRECTORY)
         continue;
       
-      if (!_ostree_sysroot_list_deployment_dirs_for_os (child, ret_deployments,
+      if (!_ostree_sysroot_list_deployment_dirs_for_os (self, child, ret_deployments,
                                                         cancellable, error))
         goto out;
     }
@@ -317,8 +364,8 @@ cleanup_old_deployments (OstreeSysroot       *self,
       g_hash_table_replace (active_boot_checksums, bootcsum, bootcsum);
     }
 
-  if (!list_all_deployment_directories (self, &all_deployment_dirs,
-                                        cancellable, error))
+  if (!_ostree_sysroot_list_all_deployment_dirs (self, &all_deployment_dirs,
+                                                 cancellable, error))
     goto out;
   
   for (i = 0; i < all_deployment_dirs->len; i++)
@@ -357,6 +404,7 @@ cleanup_old_deployments (OstreeSysroot       *self,
             goto out;
           if (!glnx_shutil_rm_rf_at (self->sysroot_fd, origin_relpath, cancellable, error))
             goto out;
+          // TODO: staging cleanup
         }
     }
 

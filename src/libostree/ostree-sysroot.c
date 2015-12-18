@@ -69,6 +69,8 @@ ostree_sysroot_finalize (GObject *object)
   g_clear_object (&self->path);
   g_clear_object (&self->sepolicy);
   g_clear_object (&self->repo);
+  g_clear_object (&self->deployments);
+  g_clear_object (&self->staged_deployments);
 
   glnx_release_lock_file (&self->lock);
 
@@ -625,26 +627,20 @@ parse_bootlink (const char    *bootlink,
 }
 
 static gboolean
-parse_deployment (OstreeSysroot       *self,
-                  const char          *boot_link,
-                  OstreeDeployment   **out_deployment,
-                  GCancellable        *cancellable,
-                  GError             **error)
+parse_deployment_from_bootlink (OstreeSysroot       *self,
+                                const char          *boot_link,
+                                OstreeDeployment   **out_deployment,
+                                GCancellable        *cancellable,
+                                GError             **error)
 {
   gboolean ret = FALSE;
   const char *relative_boot_link;
   glnx_unref_object OstreeDeployment *ret_deployment = NULL;
   int entry_boot_version;
   int treebootserial = -1;
-  int deployserial = -1;
   g_autofree char *osname = NULL;
   g_autofree char *bootcsum = NULL;
-  g_autofree char *treecsum = NULL;
-  glnx_fd_close int deployment_dfd = -1;
-  const char *deploy_basename;
   g_autofree char *treebootserial_target = NULL;
-  g_autofree char *deploy_dir = NULL;
-  GKeyFile *origin = NULL;
 
   if (!ensure_sysroot_fd (self, error))
     goto out;
@@ -663,13 +659,39 @@ parse_deployment (OstreeSysroot       *self,
   if (!treebootserial_target)
     goto out;
 
-  deploy_basename = glnx_basename (treebootserial_target);
+  if (!parse_deployment (self, treebootserial_target, bootcsum, treebootserial,
+                         out_deployment, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+out:
+  return ret;
+}
+
+static gboolean
+parse_deployment (OstreeSysroot       *self,
+                  const char          *deployment_path,
+                  const char          *bootcsum,
+                  int                  treebootserial,
+                  OstreeDeployment   **out_deployment,
+                  GCancellable        *cancellable,
+                  GError             **error)
+{
+  gboolean ret = FALSE;
+  int deployserial = -1;
+  g_autofree char *treecsum = NULL;
+  glnx_unref_object OstreeDeployment *ret_deployment = NULL;
+  const char *deploy_basename;
+  glnx_fd_close int deployment_dfd = -1;
+  GKeyFile *origin = NULL;
+
+  deploy_basename = glnx_basename (deployment_path);
 
   if (!_ostree_sysroot_parse_deploy_path_name (deploy_basename,
                                                &treecsum, &deployserial, error))
     goto out;
 
-  if (!glnx_opendirat (self->sysroot_fd, relative_boot_link, TRUE,
+  if (!glnx_opendirat (self->sysroot_fd, deployment_path, TRUE,
                        &deployment_dfd, error))
     goto out;
 
@@ -735,8 +757,8 @@ list_deployments_process_one_boot_entry (OstreeSysroot               *self,
       goto out;
     }
   
-  if (!parse_deployment (self, ostree_arg, &deployment,
-                         cancellable, error))
+  if (!parse_deployment_from_bootlink (self, ostree_arg, &deployment,
+                                       cancellable, error))
     goto out;
   
   ostree_deployment_set_bootconfig (deployment, config);
@@ -760,6 +782,70 @@ compare_deployments_by_boot_loader_version_reversed (gconstpointer     a_pp,
   return compare_boot_loader_configs (a_bootconfig, b_bootconfig);
 }
 
+GFile *
+_ostree_sysroot_get_deployment_staged_file (OstreeSysroot    *self,
+                                            OstreeDeployment *deployment)
+{
+  g_autofree char *deployment_dirpath;
+  g_autofree char *deployment_staged_path;
+  g_autoptr(GFile) deployment_staged;
+
+  deployment_dirpath = ostree_sysroot_get_deployment_dirpath (self, deployment);
+  deployment_staged_path = g_strdup_printf ("%s.staged", deployment_dirpath);
+
+  return g_file_resolve_relative_path (self->path, deployment_staged_path);
+}
+
+static gboolean
+list_staged_deployments (OstreeSysroot  *self,
+                         GPtrArray      *completed_deployments,
+                         GPtrArray      *inout_staged_deployments,
+                         GCancellable   *cancellable,
+                         GError        **error)
+{
+  gboolean ret = FALSE;
+  guint i;
+  GHashTableIter iter;
+  gpointer staged_deployment;
+  g_autoptr(GPtrArray) *current_deployments = NULL;
+  g_autoptr(GHashTable) *staged_deployment_set = g_hash_table_new (ostree_deployment_equal,
+                                                                    ostree_deployment_hash);
+
+  if (!_ostree_sysroot_list_all_deployment_dirs (self, &current_deployments,
+                                                 cancellable, error))
+    goto out;
+
+  for (i = 0; i < current_deployments->len; i++)
+    {
+      OstreeDeployment *deployment = current_deployments->pdata[i];
+      g_autofree char *deployment_dirpath;
+      g_autofree char *deployment_staged_path;
+      g_autoptr(GFile) deployment_staged = _ostree_sysroot_get_deployment_staged_file (self, deployment)
+
+      if (g_file_query_exists (deployment_staged))
+        g_hash_table_add (staged_deployment_set, deployment);
+    }
+
+  for (i = 0; i < completed_deployments; i++)
+    {
+      /* Ignore all deployments that are complete (have boot loader entries).
+       * These are no longer relevant and will be deleted on the next cleanup.
+       */
+      g_hash_table_remove (staged_deployment_set, completed_deployments->pdata[i]);
+    }
+
+  g_hash_table_iter_init (&iter, staged_deployment_set);
+  while (g_hash_table_iter_next (&iter, &staged_deployment, NULL))
+    {
+      g_object_ref (staged_deployment);
+      g_ptr_array_add (inout_staged_deployments, staged_deployment);
+    }
+
+  ret = TRUE;
+out:
+  return ret;
+}
+
 /**
  * ostree_sysroot_load:
  * @self: Sysroot
@@ -780,8 +866,10 @@ ostree_sysroot_load (OstreeSysroot  *self,
   int subbootversion = 0;
   g_autoptr(GPtrArray) boot_loader_configs = NULL;
   g_autoptr(GPtrArray) deployments = NULL;
+  g_autoptr(GPtrArray) staged_deployments = NULL;
 
   g_clear_pointer (&self->deployments, g_ptr_array_unref);
+  g_clear_pointer (&self->staged_deployments, g_ptr_array_unref);
   g_clear_pointer (&self->booted_deployment, g_object_unref);
   self->bootversion = -1;
   self->subbootversion = -1;
@@ -822,10 +910,19 @@ ostree_sysroot_load (OstreeSysroot  *self,
                                cancellable, error))
     goto out;
 
+  staged_deployments = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
+  //g_ptr_array_sort (staged_deployments, compare_deployments_by_) // TODO: sort by deployserial? what about version?
+
+  if (!list_staged_deployments (self, deployments, staged_deployments,
+                                cancellable, error))
+    goto out;
+
   self->bootversion = bootversion;
   self->subbootversion = subbootversion;
   self->deployments = deployments;
+  self->staged_deployments = staged_deployments;
   deployments = NULL; /* Transfer ownership */
+  staging_deployment_set = NULL; /* Transfer ownership */
   self->loaded = TRUE;
 
   ret = TRUE;
@@ -880,6 +977,26 @@ ostree_sysroot_get_deployments (OstreeSysroot  *self)
 }
 
 /**
+ * ostree_sysroot_get_staged_deployments:
+ * @self: Sysroot
+ *
+ * Returns: (element-type OstreeDeployment) (transfer container): TODO: Ordered list of staged deployments
+ */
+GPtrArray *
+ostree_sysroot_get_staged_deployments (OstreeSysroot  *self)
+{
+  GPtrArray *copy;
+  guint i;
+
+  g_return_val_if_fail (self->loaded, NULL);
+
+  copy = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
+  for (i = 0; i < self->staged_deployments->len; i++)
+    g_ptr_array_add (copy, g_object_ref (self->staged_deployments->pdata[i]));
+  return copy;
+}
+
+/**
  * ostree_sysroot_get_deployment_dirpath:
  * @self: Repo
  * @deployment: A deployment
@@ -911,7 +1028,10 @@ GFile *
 ostree_sysroot_get_deployment_directory (OstreeSysroot    *self,
                                          OstreeDeployment *deployment)
 {
-  return g_file_resolve_relative_path (self->path, ostree_sysroot_get_deployment_dirpath (self, deployment));
+  g_autofree char *deployment_dirpath;
+
+  deployment_dirpath = ostree_sysroot_get_deployment_dirpath (self, deployment);
+  return g_file_resolve_relative_path (self->path, deployment_dirpath);
 }
 
 /**
@@ -1347,6 +1467,8 @@ ostree_sysroot_lock_finish (OstreeSysroot         *self,
  *
  * If %OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_RETAIN is
  * specified, then all current deployments will be kept.
+ * If %OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_NO_CLEANUP
+ * is specified, then no garbage collection will be run.
  */
 gboolean
 ostree_sysroot_simple_write_deployment (OstreeSysroot      *sysroot,
@@ -1363,6 +1485,7 @@ ostree_sysroot_simple_write_deployment (OstreeSysroot      *sysroot,
   g_autoptr(GPtrArray) deployments = NULL;
   g_autoptr(GPtrArray) new_deployments = g_ptr_array_new_with_free_func (g_object_unref);
   gboolean retain = (flags & OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_RETAIN) > 0;
+  gboolean cleanup = !(flags & OSTREE_SYSROOT_SIMPLE_WRITE_DEPLOYMENT_FLAGS_NO_CLEANUP);
 
   deployments = ostree_sysroot_get_deployments (sysroot);
   booted_deployment = ostree_sysroot_get_booted_deployment (sysroot);
@@ -1392,10 +1515,66 @@ ostree_sysroot_simple_write_deployment (OstreeSysroot      *sysroot,
   if (!ostree_sysroot_write_deployments (sysroot, new_deployments, cancellable, error))
     goto out;
 
-  if (!ostree_sysroot_cleanup (sysroot, cancellable, error))
+  if (cleanup && !ostree_sysroot_cleanup (sysroot, cancellable, error))
     goto out;
 
   ret = TRUE;
  out:
   return ret;
 }
+
+gboolean
+ostree_sysroot_simple_stage_deployment (OstreeSysroot      *sysroot,
+                                        const char         *osname,
+                                        OstreeDeployment   *new_deployment,
+                                        GCancellable       *cancellable,
+                                        GError            **error)
+{
+  gboolean ret = FALSE;
+  OstreeDeployment *booted_deployment = NULL;
+  g_autoptr(GPtrArray) staged_deployments = NULL;
+  g_autoptr(GPtrArray) new_staged_deployments =
+    g_ptr_array_new_with_free_func (g_object_unref);
+
+  staged_deployments = ostree_sysroot_get_staged_deployments (sysroot);
+  booted_deployment = ostree_sysroot_get_booted_deployment (sysroot);
+
+  if (osname == NULL && booted_deployment)
+    osname = ostree_deployment_get_osname (booted_deployment);
+
+  g_ptr_array_add (new_staged_deployments, g_object_ref(new_deployment));
+
+  for (i = 0; i < staged_deployments->len; i++)
+    {
+      OstreeDeployment *deployment = staged_deployments->pdata[i];
+      /* Keep only deployments with different osnames. This ensures that
+       * only one staged deployment will exist per osname (under normal
+       * conditions) TODO: error case
+       */
+      if (osname != NULL &&
+          strcmp (ostree_deployment_get_osname (deployment), osname) != 0)
+        {
+          g_ptr_array_add (new_staged_deployments, g_object_ref (deployment));
+        }
+    }
+
+  // TODO: this has to not delete the new staged deployment!
+  // Here, it will only delete staged stuff for other osnames, but that still isn't right!
+  if (!ostree_sysroot_cleanup (sysroot, cancellable, error))
+    goto out;
+
+  if (!ostree_sysroot_write_staged_deployments (sysroot, new_staged_deployments,
+                                                cancellable, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+// Want a function to merge the (only? how to enforce?) staged deployment that matches the head
+// with the currently booted version
+
+// // TODO: goal is to merge the most recent
+// gboolean
+// ostree_sysroot_merge_staged_deployment ()

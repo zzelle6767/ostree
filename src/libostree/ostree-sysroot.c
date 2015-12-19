@@ -911,7 +911,7 @@ ostree_sysroot_load (OstreeSysroot  *self,
     goto out;
 
   staged_deployments = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
-  //g_ptr_array_sort (staged_deployments, compare_deployments_by_) // TODO: sort by deployserial? what about version?
+  //g_ptr_array_sort (staged_deployments, compare_deployments_by_) // TODO: sort by deployserial, newest first
 
   if (!list_staged_deployments (self, deployments, staged_deployments,
                                 cancellable, error))
@@ -929,6 +929,9 @@ ostree_sysroot_load (OstreeSysroot  *self,
  out:
   return ret;
 }
+
+gboolean
+ostree_sysroot_f
 
 int
 ostree_sysroot_get_bootversion (OstreeSysroot   *self)
@@ -1548,8 +1551,7 @@ ostree_sysroot_simple_stage_deployment (OstreeSysroot      *sysroot,
     {
       OstreeDeployment *deployment = staged_deployments->pdata[i];
       /* Keep only deployments with different osnames. This ensures that
-       * only one staged deployment will exist per osname (under normal
-       * conditions) TODO: error case
+       * normally only one staged deployment will exist per osname
        */
       if (osname != NULL &&
           strcmp (ostree_deployment_get_osname (deployment), osname) != 0)
@@ -1557,11 +1559,6 @@ ostree_sysroot_simple_stage_deployment (OstreeSysroot      *sysroot,
           g_ptr_array_add (new_staged_deployments, g_object_ref (deployment));
         }
     }
-
-  // TODO: this has to not delete the new staged deployment!
-  // Here, it will only delete staged stuff for other osnames, but that still isn't right!
-  if (!ostree_sysroot_cleanup (sysroot, cancellable, error))
-    goto out;
 
   if (!ostree_sysroot_write_staged_deployments (sysroot, new_staged_deployments,
                                                 cancellable, error))
